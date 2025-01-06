@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en" >
+<head>
+  <meta charset="UTF-8">
+  <title>Maya</title> 
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+  <script id="vertex-shader" type="x-shader/x-vertex">
+    attribute vec2 a_position;
+    void main() {
+      gl_Position = vec4(a_position, 0.0, 1.0);
+    }
+  </script>
+<script id="fragment-shader" type="x-shader/x-fragment">
+#ifdef GL_ES
+precision mediump float;
+#endif
+
+uniform vec2 u_resolution;
+uniform vec2 u_mouse;
+uniform float u_time;
+uniform bool u_pattern;
+uniform float u_swirl;
+uniform float u_detail;
+uniform float u_rotationSpeed;
+uniform bool u_warp;
+uniform float u_warpIntensity;
+uniform float u_reflection;
+uniform float u_movementSpeed;
+uniform float u_color;
+uniform bool u_highContrast;
+uniform float u_discard;
+
+vec3 palette(float t, float factor) {
+    vec3 a = vec3(0.5) + 0.3 * sin(vec3(0.1, 0.3, 0.5) * factor);
+    vec3 b = vec3(0.5) + 0.3 * cos(vec3(0.2, 0.4, 0.6) * factor);
+    vec3 c = vec3(1.0) + 0.5 * sin(vec3(0.3, 0.7, 0.9) * factor);
+    vec3 d = vec3(0.25, 0.4, 0.55) + 0.2 * cos(vec3(0.5, 0.6, 0.7) * factor);
+    return a + b * cos(6.28318 * (c * t + d));
+}
+  vec3 paletteContrasted(float t, float factor) {
+    vec3 a = vec3(0.5) + 0.3 * sin(vec3(0.1, 0.3, 0.5) * factor);
+    vec3 b = vec3(0.5) + 0.3 * cos(vec3(0.2, 0.4, 0.6) * factor);
+    vec3 c = vec3(1.0) + 0.5 * sin(vec3(0.3, 0.7, 0.9) * factor);
+    vec3 d = vec3(0.25, 0.4, 0.55) + 0.2 * cos(vec3(0.5, 0.6, 0.7) * factor);
+    return a + b * tan(6.28318 * (c * t + d));
+}
+  
+float hash(vec3 p) {
+    p = 50.0 * fract(p * 0.3183099 + vec3(0.71, 0.113, 0.5));
+    return -1.0 + 2.0 * fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float noiseF(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    float a = hash(i);
+    float b = hash(i + vec3(1.0, 0.0, 0.0));
+    float c = hash(i + vec3(0.0, 1.0, 0.0));
+    float d = hash(i + vec3(1.0, 1.0, 0.0));
+    float e = hash(i + vec3(0.0, 0.0, 1.0));
+    float f1 = hash(i + vec3(1.0, 0.0, 1.0));
+    float g = hash(i + vec3(0.0, 1.0, 1.0));
+    float h = hash(i + vec3(1.0, 1.0, 1.0));
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(a, b, u.x), mix(c, d, u.x), u.y), mix(mix(e, f1, u.x),
+     mix(g, h, u.x), u.y), u.z);
+}
+vec3 warp(vec3 p) {
+    vec3 offset = vec3(noiseF(p + u_time));
+    return p + offset;
+}
+
+vec3 getRayDirection(vec2 uv, vec3 camPos, vec3 camForward, vec3 camRight, 
+vec3 camUp, float fov) {
+    vec3 dir = camForward + uv.x * camRight * fov + uv.y * camUp * fov;
+    return normalize(dir);
+}
+float oscillate(float time, float minVal, float maxVal) {
+    float sineWave = sin(time);
+    float normalizedSine = (sineWave + 1.0) / 2.0;
+    return mix(minVal, maxVal, normalizedSine);
+}
+float waveX(float z){
+    return sin((z + u_time) * 0.05) * 20.0;
+}
+float waveXOffset(float z, float zOffset) {
+    return sin((z + zOffset + u_time) * 0.05) * 20.0;
+}
+
+float tubeSDF(vec3 p, float outerRadius, float innerRadius) {
+    p.x += waveX(p.z);
+    p.y += waveX(p.z);
+    if(u_warp){
+      p += warp(p * u_warpIntensity);
+    }
+    float radialDist = length(p.xy);
+    float outerDist = radialDist - outerRadius;
+    float innerDist = innerRadius - radialDist;
+    return max(outerDist, innerDist);
+}
+
+float sceneSDF(vec3 p, vec3 camPos) {
+    float tube = tubeSDF(p, 25.0, 20.0);
+    return min(tube, 1.0);
+}
+vec3 calculateNormal(vec3 p, float epsilon) {
+    vec3 d = vec3(epsilon, 0.0, 0.0);
+    return normalize(vec3(
+        sceneSDF(p + d.xyy, p) - sceneSDF(p - d.xyy, p),
+        sceneSDF(p + d.yxy, p) - sceneSDF(p - d.yxy, p),
+        sceneSDF(p + d.yyx, p) - sceneSDF(p - d.yyx, p)
+    ));
+}
+
+vec3 reflectColor(vec3 worldPos, vec3 camPos, vec3 rayDir) {
+    vec3 normal = calculateNormal(worldPos, 0.0);
+    vec3 reflectedDir = reflect(rayDir, normal);
+    vec3 environmentColor = palette(length(worldPos * 0.02), u_color);
+    return environmentColor;
+}
+
+vec3 getColor(vec3 worldPos, vec3 camPos, vec3 rayDir) {
+    float tubeDist = tubeSDF(worldPos, 25.0 , 20.0);
+    float closestDist = min(tubeDist, 1.0);
+    if(closestDist == tubeDist){
+        vec3 skewedPos = vec3(worldPos.x + waveX(worldPos.z), 
+        worldPos.y + waveX(worldPos.z), worldPos.z);
+        float angle = atan(skewedPos.x, skewedPos.y);
+		float radius = length(vec2(worldPos.x, worldPos.y));
+		float spiral = sin(angle * u_detail + skewedPos.z * u_swirl + u_time 
+        * u_rotationSpeed);
+        if(u_pattern){
+          spiral += sin(skewedPos.z * 2.0);
+        }
+        vec3 baseColor = u_highContrast ? paletteContrasted(spiral * 0.2, u_color)
+         : palette(spiral * 0.2, u_color);
+        vec3 reflection = reflectColor(worldPos, camPos, rayDir);
+        vec3 finalColor = mix(baseColor, reflection, u_reflection);
+        if(abs(spiral) > u_discard)
+        return finalColor;
+    }
+    return vec3(0.0);
+}
+
+float rayMarch(vec3 ro, vec3 rd) {
+    float t = 0.0;
+    float maxDist = 400.0;
+    float hitThreshold = 0.003;
+    
+    for (int i = 0; i < 400; i++) {
+        vec3 p = ro + rd * t;
+        float dist = sceneSDF(p, ro);
+        
+        if (dist < hitThreshold) {
+            return t;
+        }
+        t += dist * 0.5;
+        if (t > maxDist) break;
+    }
+    return maxDist;
+}
+
+void main() {
+    vec2 uv = (gl_FragCoord.xy / u_resolution.xy) * 2.0 - 1.0;
+    uv.x *= u_resolution.x / u_resolution.y;
+    vec3 camPos = vec3(0.0 , 0.0, 0.0);
+    camPos.z += u_time * u_movementSpeed;
+    camPos.x = waveXOffset(camPos.z, -60.0);
+    camPos.y = waveXOffset(camPos.z, -60.0);
+    vec3 camForward = normalize(vec3(waveXOffset(camPos.z, -60.0) * -2.0,
+     waveXOffset(camPos.z, -60.0), 100.0));
+    vec3 camRight = normalize(cross(camForward, vec3(0.0, 1.0, 0.0)));
+    vec3 camUp = cross(camRight, camForward);
+    
+    vec3 rayDir = getRayDirection(uv, camPos, camForward, camRight, camUp, 1.5);
+
+    float dist = rayMarch(camPos, rayDir);
+    vec3 color = vec3(0.0);
+    if (dist < 200.0) {
+        vec3 worldPos = camPos + rayDir * dist;
+        color += getColor(worldPos, camPos, rayDir);
+    }else {
+        color += vec3(0.0);
+    }
+	gl_FragColor = vec4(color, 1.0);
+}
+</script>
+  <script type="module" src="./script.js"></script>
+</body>
+</html>
+<!-- Yogesh Gadekar -->
